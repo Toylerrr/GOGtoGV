@@ -117,14 +117,25 @@ def process_installer(installer):
 # Process all installers in a directory as one game (base game metadata is used)
 def process_directory_game(game_dir):
     print(f"Processing game in directory: {game_dir}")
-    base_installer = next(game_dir.glob("*.exe"), None)
-    if not base_installer:
+    exe_files = list(game_dir.glob("*.exe"))
+    if not exe_files:
         print(f"No installer found in {game_dir}. Skipping.")
         return
 
+    # Select the base installer using the shortest filename heuristic.
+    base_installer = min(exe_files, key=lambda e: len(e.name))
+    print(f"Determined base installer as: {base_installer.name}")
+
     try:
-        result = subprocess.run(["innoextract", "--gog-game-id", str(base_installer)], capture_output=True, text=True)
-        gog_game_id = next((line.split("ID is ")[-1] for line in result.stdout.splitlines() if "ID is " in line), None)
+        result = subprocess.run(
+            ["innoextract", "--gog-game-id", str(base_installer)],
+            capture_output=True,
+            text=True
+        )
+        gog_game_id = next(
+            (line.split("ID is ")[-1] for line in result.stdout.splitlines() if "ID is " in line),
+            None
+        )
         if not gog_game_id:
             raise ValueError("No game ID found")
     except Exception as e:
@@ -137,17 +148,31 @@ def process_directory_game(game_dir):
     else:
         folder_name = f"{game_name} (W_P) ({year})"
     folder_name = folder_name.replace(":", "")
-    
+
     game_folder = WATCH_DIR / PROCESSED_DIR / folder_name
     game_folder.mkdir(parents=True, exist_ok=True)
-    
+
+    # Create a temporary directory for extraction
     temp_dir = Path(tempfile.mkdtemp(prefix="processing_", dir=WATCH_DIR))
     try:
-        for installer in game_dir.glob("*.exe"):
-            if str(installer) in processed_files:
+        # FIRST, process the base installer.
+        if str(base_installer) not in processed_files:
+            print(f"Extracting base installer: {base_installer}")
+            subprocess.run(
+                ["innoextract", "--gog", "--exclude-temp", "--output-dir", str(temp_dir), str(base_installer)],
+                check=True
+            )
+
+        # THEN, process the remaining installers.
+        for installer in exe_files:
+            # Skip the base installer (already processed) and any already processed files.
+            if installer == base_installer or str(installer) in processed_files:
                 continue
             print(f"Extracting {installer}...")
-            subprocess.run(["innoextract", "--gog", "--exclude-temp", "--output-dir", str(temp_dir), str(installer)], check=True)
+            subprocess.run(
+                ["innoextract", "--gog", "--exclude-temp", "--output-dir", str(temp_dir), str(installer)],
+                check=True
+            )
     except Exception as e:
         print(f"Error during extraction: {e}")
         shutil.rmtree(temp_dir)
@@ -167,14 +192,16 @@ def process_directory_game(game_dir):
         print(f"Cleaning up {temp_dir}...")
         shutil.rmtree(temp_dir)
 
-    for installer in game_dir.glob("*.exe"):
+    # Move all processed installer files
+    for installer in exe_files:
         if str(installer) in processed_files:
             continue
         processed_path = game_folder / installer.name
         installer.rename(processed_path)
         print(f"Moved {installer} to {processed_path}.")
         processed_files.add(str(installer))
-    
+
+    # Process and move any .bin files related to the installers.
     for bin_file in game_dir.glob("*.bin"):
         new_bin_path = game_folder / bin_file.name
         bin_file.rename(new_bin_path)
